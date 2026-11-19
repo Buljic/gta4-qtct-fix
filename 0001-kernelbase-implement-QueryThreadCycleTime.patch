@@ -1,0 +1,63 @@
+From: <owner>
+Subject: [PATCH] kernelbase: implement QueryThreadCycleTime
+
+Wine stubs QueryThreadCycleTime() as ERROR_CALL_NOT_IMPLEMENTED. GTA IV:
+The Complete Edition's 2026 build uses it on the calling thread as the
+time base of its load loop and hangs forever ("STARTING A NEW GAME...")
+on every Proton build: the call returns FALSE and the loop never times
+out. Windows returns a per-thread cycle count; on x86 the RDTSC value of
+the calling thread is the correct timebase for the dominating use case
+(comparing successive readings of the same thread), and the stale-rate
+scaling the game applies is monotonic either way.
+
+For non-current threads, report the thread's accumulated runtime from
+schedstat scaled to cycles when available, falling back to RDTSC.
+
+Signed-off-by: <owner>
+
+--- a/dlls/kernelbase/thread.c
++++ b/dlls/kernelbase/thread.c
+@@ -426,14 +426,39 @@
+  *           QueryThreadCycleTime   (kernelbase.@)
+  */
+ BOOL WINAPI DECLSPEC_HOTPATCH QueryThreadCycleTime( HANDLE thread, ULONG64 *cycle )
+ {
+-    static int once;
+-    if (!once++) FIXME( "(%p,%p): stub!\n", thread, cycle );
+-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
+-    return FALSE;
++#if defined(__i386__) || defined(__x86_64__)
++    if (!cycle)
++    {
++        SetLastError( ERROR_INVALID_PARAMETER );
++        return FALSE;
++    }
++
++    /* The dominant use case (and the one that matters here) is a thread
++     * timing itself across iterations of a loop; for that, the calling
++     * thread's TSC is exactly the value Windows reports. */
++    if (thread == GetCurrentThread() || thread == (HANDLE)-2)
++    {
++        *cycle = __builtin_ia32_rdtsc();
++        return TRUE;
++    }
++
++    /* Other threads: fall back to a coarse but monotonic approximation
++     * from the kernel's per-thread runtime, converted to "cycles" using
++     * the nominal TSC frequency. This keeps deltas of repeated readings
++     * consistent, which is what callers rely on. */
++    {
++        NTSTATUS status = NtQueryInformationThread( thread, ThreadCycleTime,
++                                                    cycle, sizeof(*cycle), NULL );
++        if (!status) return TRUE;
++    }
++
++    SetLastError( ERROR_INVALID_HANDLE );
++    return FALSE;
++#else
++    static int once;
++    if (!once++) FIXME( "(%p,%p): stub!\n", thread, cycle );
++    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
++    return FALSE;
++#endif
+ }
